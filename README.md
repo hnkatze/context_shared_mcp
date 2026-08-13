@@ -39,9 +39,34 @@ claude mcp add context-shared \
 
 ## The one deployment rule
 
-The server must connect as an ordinary Postgres role. Supabase's `service_role`
-bypasses RLS entirely, which would leave every policy here decorative and expose
-one tenant's context to another.
+**Connect as a dedicated role. Never with the credentials Supabase hands you.**
+
+Postgres lets two kinds of role walk past row level security:
+
+| Escape hatch | Stopped by |
+|---|---|
+| owning the table | `FORCE ROW LEVEL SECURITY`, which this schema sets |
+| the `BYPASSRLS` attribute | nothing — it outranks FORCE |
+
+The default `postgres` role of a Supabase project carries `BYPASSRLS`, and so
+does `service_role`. Connecting with either makes every policy here decoration
+while the application keeps working perfectly, which is the worst possible
+failure mode: silent, and only visible once two organizations are on the board.
+
+Create the application role once, as `postgres`:
+
+```sql
+create role context_app login password :>password<:
+  nosuperuser nocreatedb nocreaterole nobypassrls;
+grant usage on schema public, app to context_app;
+grant select, insert, update, delete on all tables in schema public to context_app;
+grant execute on all functions in schema app to context_app;
+```
+
+Migrations run as `postgres` (it owns the tables). Everything else — the MCP
+server and the panel — logs in as `context_app`. `supabase/tests` asserts the
+role in use carries neither `BYPASSRLS` nor superuser, so a regression here
+fails the suite instead of leaking quietly.
 
 ## Card shape
 
