@@ -16,7 +16,6 @@ even when RLS does not apply.
 | `supabase/tests/0001_tenancy_test.sql` | Isolation and quality-gate assertions |
 | `supabase/seed/dev_seed.sql` | Two dev tenants and their API keys |
 | `mcp/` | The MCP server, in two transports: `mcp/src/stdio.ts` (local) and `mcp/src/http.ts` (hosted) |
-| `web/` | Astro admin panel, SSR on Vercel |
 | `scripts/dev-up.sh` | Local Postgres on :55432, migrated and seeded |
 | `scripts/db-test.sh` | Throwaway Postgres, migration, tenancy tests |
 
@@ -64,7 +63,7 @@ grant execute on all functions in schema app to context_app;
 ```
 
 Migrations run as `postgres` (it owns the tables). Everything else — the MCP
-server and the panel — logs in as `context_app`. `supabase/tests` asserts the
+server and any other consumer — logs in as `context_app`. `supabase/tests` asserts the
 role in use carries neither `BYPASSRLS` nor superuser, so a regression here
 fails the suite instead of leaking quietly.
 
@@ -75,27 +74,17 @@ publisher cannot say what the code and the spec fail to convey, there is no card
 worth writing. `card_key` is a stable slug: republishing it updates the card
 rather than adding a duplicate.
 
-## Deploying the panel to Vercel
+## A note for serverless consumers
 
-The panel runs as serverless functions, which changes one thing that matters:
-**point `CONTEXT_SHARED_DATABASE_URL` at Supabase's transaction-mode pooler
-(port 6543), never at the direct connection (port 5432).** Vercel spins up many
-isolated instances, and each one opening its own direct connections exhausts
-Postgres long before traffic does.
+The admin panel lives in its own repository. Anything that reads this board
+from a serverless runtime inherits one constraint: point it at the
+transaction-mode pooler (port 6543), never at the direct connection, and cap
+the pool at one connection per instance. Many isolated instances each opening
+direct connections exhaust Postgres long before traffic does.
 
-This works only because the tenant is set with `set_config(..., true)`, which
-is transaction-scoped. A session-scoped setting would survive the transaction
-and leak one tenant's id onto the next request that reuses the backend.
-
-The MCP server is unaffected: it runs locally on each developer's machine and
-uses the direct connection.
-
-Environment variables to set in Vercel:
-
-```
-CONTEXT_SHARED_DATABASE_URL=postgres://...@...pooler.supabase.com:6543/postgres
-CONTEXT_SHARED_API_KEY=ctx_...
-```
+That is safe here only because the tenant is set with the transaction-local
+form of `set_config`. A session-scoped setting would outlive the transaction
+and leak one tenant onto the next request sharing the backend.
 
 ## Two transports, one set of tools
 
