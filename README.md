@@ -89,6 +89,14 @@ is almost always a typo, and the two boards a silent create would produce each
 hold half the truth — the worst outcome here, because both look healthy. When
 the split is deliberate, `create_project: true` carries it through.
 
+## Telling an agent how to use the board
+
+`usage_guide` returns the contract in prose: when to publish, what clears the
+quality gate, how a project gets named, and how to search before asking a
+teammate. Called with `as_skill: true` it returns the same contract as a
+`SKILL.md`, so an agent can be handed the conventions without being handed this
+README.
+
 ## A note for serverless consumers
 
 The admin panel lives in its own repository. Anything that reads this board

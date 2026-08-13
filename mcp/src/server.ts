@@ -4,6 +4,7 @@ import * as z from "zod/v4";
 import type { Db } from "./db/pool.js";
 import { withTenant } from "./db/pool.js";
 import { formatCards, formatProjects } from "./cards/format.js";
+import { SKILL_DOC, USAGE_GUIDE } from "./cards/guide.js";
 import {
   ConfusableProjectError,
   listProjects,
@@ -102,6 +103,23 @@ export function createContextServer(db: Db, orgId: string): McpServer {
         return fail(describe(error));
       }
     },
+  );
+
+  server.registerTool(
+    "usage_guide",
+    {
+      description:
+        "How this board expects to be used: when to publish, what clears the quality " +
+        "gate, how a project gets named, and how to search before asking a teammate. " +
+        "Read it once per session, before the first publish.",
+      inputSchema: z.object({
+        as_skill: z
+          .boolean()
+          .default(false)
+          .describe("Return the guide as a SKILL.md file, ready to drop into an agent"),
+      }),
+    },
+    (input): ToolResult => ok(input.as_skill ? SKILL_DOC : USAGE_GUIDE),
   );
 
   return server;

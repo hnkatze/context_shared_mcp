@@ -131,8 +131,8 @@ async function main(): Promise<void> {
   const tools = await client.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
   check(
-    "exposes the three tools",
-    names.join(",") === "list_projects,publish_context,search_context",
+    "exposes the four tools",
+    names.join(",") === "list_projects,publish_context,search_context,usage_guide",
     `got: ${names.join(",")}`,
   );
 
@@ -290,6 +290,18 @@ async function main(): Promise<void> {
     acrossProjects.includes("pooler-limit"),
     acrossProjects,
   );
+
+  // ---------------------------------------------------------------- usage guide
+
+  const guide = textOf(await client.callTool({ name: "usage_guide", arguments: {} }));
+  check("usage_guide states the quality gate", guide.includes("why_not_obvious"), guide);
+  check("usage_guide names the tools it documents", guide.includes("publish_context"), guide);
+
+  const skill = textOf(
+    await client.callTool({ name: "usage_guide", arguments: { as_skill: true } }),
+  );
+  check("usage_guide can emit a skill file", skill.startsWith("---\nname:"), skill);
+
 
   // ---------------------------------------------------------------- isolation
 
