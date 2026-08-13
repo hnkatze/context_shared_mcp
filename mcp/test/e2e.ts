@@ -173,6 +173,27 @@ async function main(): Promise<void> {
   );
   check("the update is visible", afterUpdate.includes("expire in 24h"), afterUpdate);
 
+  // The reason the board exists: an agent asks in prose, not in boolean syntax.
+  const naturalQuestion = textOf(
+    await client.callTool({
+      name: "search_context",
+      arguments: { query: "how do idempotency keys behave when a request is retried" },
+    }),
+  );
+  check(
+    "a natural-language question finds the card",
+    naturalQuestion.includes("idempotency-scope"),
+    naturalQuestion,
+  );
+
+  const quotedPhrase = textOf(
+    await client.callTool({
+      name: "search_context",
+      arguments: { query: "\"scoped per merchant\"" },
+    }),
+  );
+  check("a quoted phrase still works", quotedPhrase.includes("idempotency-scope"), quotedPhrase);
+
   const byTag = textOf(
     await client.callTool({ name: "search_context", arguments: { tags: ["orders"] } }),
   );

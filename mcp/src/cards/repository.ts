@@ -135,9 +135,25 @@ type CardRow = {
   updated_at: Date;
 };
 
-export async function searchCards(
+/**
+ * A natural-language question never matches: websearch_to_tsquery ANDs every
+ * term, and the simple configuration keeps stopwords as real lexemes. This
+ * builds an OR of the same words so ts_rank can order them, used only as a
+ * fallback so quoted phrases and exclusions still work when they find something.
+ */
+function looseQuery(query: string): string | null {
+  const words = query
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}_]+/u)
+    .filter((word) => word.length > 1);
+  return words.length === 0 ? null : words.join(" | ");
+}
+
+async function runSearch(
   client: PoolClient,
   input: SearchInput,
+  queryText: string | null,
+  loose: boolean,
 ): Promise<readonly Card[]> {
   const result = await client.query<CardRow>(
     `select c.card_key, p.slug as project, c.module, c.summary, c.why_not_obvious,
@@ -149,10 +165,10 @@ export async function searchCards(
         and ($2::text is null or c.module = $2)
         and ($3::text[] is null or c.tags && $3)
         and ($4::text is null
-             or c.search_vector @@ websearch_to_tsquery('simple', $4))
+             or c.search_vector @@ (case when $6::bool then to_tsquery('simple', $4) else websearch_to_tsquery('simple', $4) end))
       order by case
                  when $4::text is null then 0
-                 else ts_rank(c.search_vector, websearch_to_tsquery('simple', $4))
+                 else ts_rank(c.search_vector, (case when $6::bool then to_tsquery('simple', $4) else websearch_to_tsquery('simple', $4) end))
                end desc,
                c.updated_at desc
       limit $5`,
@@ -160,8 +176,9 @@ export async function searchCards(
       input.project ?? null,
       input.module ?? null,
       input.tags ?? null,
-      input.query ?? null,
+      queryText,
       input.limit,
+      loose,
     ],
   );
 
@@ -179,4 +196,16 @@ export async function searchCards(
     author: row.author,
     updatedAt: row.updated_at.toISOString(),
   }));
+}
+
+export async function searchCards(
+  client: PoolClient,
+  input: SearchInput,
+): Promise<readonly Card[]> {
+  const strict = await runSearch(client, input, input.query ?? null, false);
+  if (strict.length > 0 || input.query === undefined) return strict;
+
+  const loose = looseQuery(input.query);
+  if (loose === null) return strict;
+  return runSearch(client, input, loose, true);
 }
