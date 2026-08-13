@@ -115,12 +115,20 @@ one process cannot see each other.
 
 ## Deploying the server to Railway
 
-`mcp/railway.json` sets the build, the start command and the `/health` check.
-In the Railway service settings:
+The repository holds three deployables, so the root `Dockerfile` builds only
+the MCP server. Railway detects it with no Root Directory setting, which its
+Railpack builder needs here: pointed at the repository root it finds no
+manifest and refuses to guess.
 
-1. Set **Root Directory** to `mcp` — the repo also holds `web/` and `supabase/`.
-2. Set `CONTEXT_SHARED_DATABASE_URL` (Supabase transaction pooler, port 6543).
-3. Leave `PORT` alone; Railway injects it and the server reads it.
+Set one variable on the service:
+
+```
+CONTEXT_SHARED_DATABASE_URL=postgresql://context_app.<ref>:<password>@<region>.pooler.supabase.com:6543/postgres
+```
+
+`PORT` is injected by Railway. `CONTEXT_SHARED_API_KEY` is deliberately absent:
+over HTTP the key belongs to the caller, so setting one here would pin every
+caller to a single tenant.
 
 Connecting a client to the hosted server:
 
