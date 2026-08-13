@@ -30,7 +30,12 @@ create table projects (
   slug        text not null,
   name        text not null,
   created_at  timestamptz not null default now(),
-  unique (org_id, slug)
+  unique (org_id, slug),
+
+  -- Referenced by cards as a composite foreign key. Foreign keys are checked
+  -- by the system and are not subject to RLS, so this enforces that a card and
+  -- its project share an org without depending on what any role can see.
+  unique (id, org_id)
 );
 
 create index projects_org_idx on projects (org_id);
@@ -82,7 +87,7 @@ as $$ select array_to_string(arr, ' ') $$;
 create table cards (
   id          uuid primary key default gen_random_uuid(),
   org_id      uuid not null references organizations(id) on delete cascade,
-  project_id  uuid not null references projects(id) on delete cascade,
+  project_id  uuid not null,
 
   module      text not null,
 
@@ -124,38 +129,16 @@ create table cards (
     )
   ) stored,
 
-  unique (project_id, card_key)
+  unique (project_id, card_key),
+
+  foreign key (project_id, org_id)
+    references projects (id, org_id) on delete cascade
 );
 
 create index cards_org_project_idx on cards (org_id, project_id);
 create index cards_module_idx      on cards (org_id, module);
 create index cards_tags_idx        on cards using gin (tags);
 create index cards_search_idx      on cards using gin (search_vector);
-
--- A card's project must belong to the same org as the card.
--- security definer on purpose: under RLS this trigger cannot see other
--- tenants rows, so it would report a foreign project as missing and block
--- for the wrong reason. It must compare the real ownership.
-create or replace function app.assert_card_tenant()
-returns trigger
-language plpgsql
-security definer
-set search_path = public, pg_temp
-as $$
-begin
-  if not exists (
-    select 1 from projects p
-     where p.id = new.project_id and p.org_id = new.org_id
-  ) then
-    raise exception 'project % does not belong to org %', new.project_id, new.org_id;
-  end if;
-  return new;
-end
-$$;
-
-create trigger cards_tenant_check
-  before insert or update of org_id, project_id on cards
-  for each row execute function app.assert_card_tenant();
 
 create or replace function app.touch_updated_at()
 returns trigger
@@ -177,6 +160,14 @@ alter table organizations enable row level security;
 alter table projects      enable row level security;
 alter table api_keys      enable row level security;
 alter table cards         enable row level security;
+
+-- Postgres exempts the owner of a table from its own policies, and Supabase
+-- connects as that owner. Without forcing, the whole tenancy model is
+-- decorative. api_keys stays unforced on purpose: resolve_api_key has to read
+-- it before any tenant is known.
+alter table organizations force row level security;
+alter table projects      force row level security;
+alter table cards         force row level security;
 
 create policy org_is_current on organizations
   for all using (id = app.current_org_id())
