@@ -74,6 +74,21 @@ publisher cannot say what the code and the spec fail to convey, there is no card
 worth writing. `card_key` is a stable slug: republishing it updates the card
 rather than adding a duplicate.
 
+## Naming a project
+
+`project` is a plain name, not a registration. "BipBip BackOffice" and
+`bipbip-backoffice` land on the same slug, and a project nobody has used yet is
+created by the publish that first mentions it. The API key names the
+organization and stops there: every project inside it is readable and writable,
+which is the whole point of a shared board.
+
+One guard sits on that convenience. A name one or two edits away from a project
+that already exists is refused, and the neighbour is named back to the caller.
+Publishing into `bipbipbackoffice` while `bipbip-backoffice` holds twelve cards
+is almost always a typo, and the two boards a silent create would produce each
+hold half the truth — the worst outcome here, because both look healthy. When
+the split is deliberate, `create_project: true` carries it through.
+
 ## A note for serverless consumers
 
 The admin panel lives in its own repository. Anything that reads this board

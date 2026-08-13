@@ -12,7 +12,13 @@ export const sourceRefSchema = z.object({
 });
 
 export const publishInputSchema = z.object({
-  project: z.string().min(1).describe("Project slug this card belongs to"),
+  project: z
+    .string()
+    .min(1)
+    .describe(
+      "Project this card belongs to, written however you say it. It is created " +
+        "on first use; a near-miss of an existing project is refused instead.",
+    ),
   module: z.string().min(1).describe("Feature or module name, e.g. checkout"),
   card_key: z
     .string()
@@ -35,6 +41,13 @@ export const publishInputSchema = z.object({
     .describe("Verifiable anchors, so a card written from a stale session can be checked"),
   tags: z.array(z.string().min(1)).default([]),
   author: z.string().min(1),
+  create_project: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Only after a refusal: confirms the new project is meant to sit beside the " +
+        "similar one already on the board, rather than being a misspelling of it.",
+    ),
 });
 
 export const searchInputSchema = z.object({

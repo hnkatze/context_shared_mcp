@@ -5,10 +5,11 @@ import type { Db } from "./db/pool.js";
 import { withTenant } from "./db/pool.js";
 import { formatCards, formatProjects } from "./cards/format.js";
 import {
+  ConfusableProjectError,
   listProjects,
   publishCard,
   searchCards,
-  UnknownProjectError,
+  UnusableProjectNameError,
 } from "./cards/repository.js";
 import { publishInputSchema, searchInputSchema } from "./cards/schema.js";
 
@@ -42,7 +43,7 @@ export function createContextServer(db: Db, orgId: string): McpServer {
     {
       description:
         "List the projects in this organization and how many context cards each holds. " +
-        "Call this before publishing to find the right project slug.",
+        "Call this before publishing to see which names are already in use.",
       inputSchema: z.object({}),
     },
     async (): Promise<ToolResult> => {
@@ -60,7 +61,8 @@ export function createContextServer(db: Db, orgId: string): McpServer {
       description:
         "Publish a context card: what a consumer of this module cannot learn from the " +
         "code or the OpenAPI spec. Republishing the same card_key updates the card " +
-        "instead of creating a duplicate.",
+        "instead of creating a duplicate. The project is created on first use, so " +
+        "nothing has to be registered before publishing into it.",
       inputSchema: publishInputSchema,
     },
     async (input): Promise<ToolResult> => {
@@ -69,9 +71,15 @@ export function createContextServer(db: Db, orgId: string): McpServer {
           publishCard(client, orgId, input),
         );
         const verb = result.created ? "Published" : "Updated";
-        return ok(`${verb} \`${result.cardKey}\` in ${input.project}/${input.module}.`);
+        const note = result.projectCreated
+          ? ` New project on the board: \`${result.project}\`.`
+          : "";
+        return ok(
+          `${verb} \`${result.cardKey}\` in ${result.project}/${input.module}.${note}`,
+        );
       } catch (error) {
-        if (error instanceof UnknownProjectError) return fail(error.message);
+        if (error instanceof ConfusableProjectError) return fail(error.message);
+        if (error instanceof UnusableProjectNameError) return fail(error.message);
         return fail(describe(error));
       }
     },
@@ -82,7 +90,8 @@ export function createContextServer(db: Db, orgId: string): McpServer {
     {
       description:
         "Search the shared context board. Use it before asking a teammate how a module " +
-        "behaves, and before assuming an OpenAPI spec tells the whole story.",
+        "behaves, and before assuming an OpenAPI spec tells the whole story. Omitting " +
+        "project sweeps every project in the organization.",
       inputSchema: searchInputSchema,
     },
     async (input): Promise<ToolResult> => {

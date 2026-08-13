@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import type { PublishInput, SearchInput } from "./schema.js";
+import { isConfusable, toSlug } from "./slug.js";
 
 export type Project = {
   readonly slug: string;
@@ -36,15 +37,34 @@ export type Card = {
 export type PublishResult = {
   readonly cardKey: string;
   readonly created: boolean;
+  readonly project: string;
+  readonly projectCreated: boolean;
 };
 
-export class UnknownProjectError extends Error {
+export type ResolvedProject = {
+  readonly id: string;
+  readonly slug: string;
+  readonly created: boolean;
+};
+
+export class ConfusableProjectError extends Error {
   constructor(
     readonly slug: string,
-    readonly available: readonly string[],
+    readonly nearest: readonly string[],
   ) {
-    super(`Unknown project "${slug}". Available: ${available.join(", ") || "none"}`);
-    this.name = "UnknownProjectError";
+    super(
+      `Nothing published. "${slug}" does not exist yet, but this organization ` +
+        `already has ${nearest.map((s) => `"${s}"`).join(", ")}. Publish under ` +
+        `that one, or repeat the call with create_project: true if the split is deliberate.`,
+    );
+    this.name = "ConfusableProjectError";
+  }
+}
+
+export class UnusableProjectNameError extends Error {
+  constructor(readonly attempted: string) {
+    super(`"${attempted}" leaves no letters or digits to name a project with.`);
+    this.name = "UnusableProjectNameError";
   }
 }
 
@@ -63,23 +83,54 @@ export async function listProjects(client: PoolClient): Promise<readonly Project
   }));
 }
 
+/**
+ * A project is a name, not a registration: an unknown one is created on the
+ * spot, unless it reads as a misspelling of a project that already exists.
+ * @throws ConfusableProjectError when a near-miss is found and allowCreate is false
+ */
+export async function resolveProject(
+  client: PoolClient,
+  orgId: string,
+  name: string,
+  allowCreate: boolean,
+): Promise<ResolvedProject> {
+  const slug = toSlug(name);
+  if (slug === "") throw new UnusableProjectNameError(name);
+
+  const existing = await client.query<{ id: string }>(
+    "select id from projects where slug = $1",
+    [slug],
+  );
+  const found = existing.rows[0]?.id;
+  if (found !== undefined) return { id: found, slug, created: false };
+
+  if (!allowCreate) {
+    const nearest = (await listProjects(client))
+      .map((project) => project.slug)
+      .filter((candidate) => isConfusable(slug, candidate));
+    if (nearest.length > 0) throw new ConfusableProjectError(slug, nearest);
+  }
+
+  // Two agents can publish into the same new project at once; the conflict
+  // clause makes the loser read the winner's row instead of failing.
+  const inserted = await client.query<{ id: string; created: boolean }>(
+    `insert into projects (org_id, slug, name) values ($1, $2, $3)
+       on conflict (org_id, slug) do update set name = projects.name
+     returning id, (xmax = 0) as created`,
+    [orgId, slug, name.trim()],
+  );
+  const project = inserted.rows[0];
+  if (project === undefined) throw new Error("project upsert returned no row");
+  return { id: project.id, slug, created: project.created };
+}
+
 export async function publishCard(
   client: PoolClient,
   orgId: string,
   input: PublishInput,
 ): Promise<PublishResult> {
-  const project = await client.query<{ id: string }>(
-    "select id from projects where slug = $1",
-    [input.project],
-  );
-  const projectId = project.rows[0]?.id;
-  if (projectId === undefined) {
-    const available = await listProjects(client);
-    throw new UnknownProjectError(
-      input.project,
-      available.map((p) => p.slug),
-    );
-  }
+  const project = await resolveProject(client, orgId, input.project, input.create_project);
+  const projectId = project.id;
 
   // xmax is zero on a freshly inserted row, so it distinguishes an insert from
   // an update without a second round trip.
@@ -117,7 +168,12 @@ export async function publishCard(
 
   const row = result.rows[0];
   if (row === undefined) throw new Error("publish returned no row");
-  return { cardKey: row.card_key, created: row.created };
+  return {
+    cardKey: row.card_key,
+    created: row.created,
+    project: project.slug,
+    projectCreated: project.created,
+  };
 }
 
 type CardRow = {

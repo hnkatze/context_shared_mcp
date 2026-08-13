@@ -99,6 +99,26 @@ begin
 exception when check_violation then null;
 end $$;
 
+-- The server creates a project on first publish, so that write is part of the
+-- tenant surface now: allowed inside your own org, refused outside it.
+do $$
+declare n int;
+begin
+  insert into projects (org_id, slug, name)
+  values ('11111111-1111-1111-1111-111111111111', 'orders', 'Orders');
+
+  select count(*) into n from projects;
+  if n <> 2 then raise exception 'the app role cannot create a project in its own org'; end if;
+end $$;
+
+do $$
+begin
+  insert into projects (org_id, slug, name)
+  values ('22222222-2222-2222-2222-222222222222', 'smuggled', 'Smuggled');
+  raise exception 'cross-tenant project insert was allowed';
+exception when insufficient_privilege then null;
+end $$;
+
 -- ---------------------------------------------------------------- search
 
 do $$

@@ -11,6 +11,11 @@ const WHY =
   "merchant and expires after 24h, so a retry the next day silently creates a " +
   "second order instead of returning the first one.";
 
+const POOLER_WHY =
+  "Nothing in the connection string says so, but a serverless instance must dial " +
+  "the transaction pooler on 6543 and cap its pool at one, because many isolated " +
+  "instances exhaust Postgres long before the traffic does.";
+
 let failures = 0;
 
 function check(name: string, passed: boolean, detail?: string): void {
@@ -83,9 +88,9 @@ function makeTransport(apiKey: string): StdioClientTransport {
 
 
 /**
- * The suite asserts insert-versus-update, so it cannot inherit cards from a
- * previous run. Clears through the same tenant mechanism the server uses, which
- * keeps the test honest about what an ordinary role is allowed to do.
+ * The suite asserts insert-versus-update and first-time project creation, so it
+ * cannot inherit either from a previous run. Clearing through the same tenant
+ * mechanism the server uses keeps the test honest about what an ordinary role may do.
  */
 async function resetCards(): Promise<void> {
   const pool = new pg.Pool({ connectionString: DATABASE_URL });
@@ -104,6 +109,7 @@ async function resetCards(): Promise<void> {
         await client.query("begin");
         await client.query("select set_config('app.current_org_id', $1, true)", [orgId]);
         await client.query("delete from cards");
+        await client.query("delete from projects where slug not in ('checkout', 'billing')");
         await client.query("commit");
       } finally {
         client.release();
@@ -210,16 +216,80 @@ async function main(): Promise<void> {
   });
   check("a thin why_not_obvious is rejected", thin.isError === true, textOf(thin));
 
-  const wrongProject = await client.callTool({
+  // ------------------------------------------ a project is a name, not a registration
+
+  const newProject = await client.callTool({
     name: "publish_context",
-    arguments: cardPayload({ card_key: "orphan", project: "does-not-exist" }),
+    arguments: cardPayload({
+      project: "BipBip BackOffice",
+      module: "db",
+      card_key: "pooler-limit",
+      summary: "Serverless callers must dial the transaction pooler",
+      why_not_obvious: POOLER_WHY,
+      tags: ["db"],
+    }),
   });
   check(
-    "an unknown project fails with the available list",
-    wrongProject.isError === true && textOf(wrongProject).includes("Available:"),
-    textOf(wrongProject),
+    "publishing under an unknown name creates the project",
+    textOf(newProject).startsWith("Published") &&
+      textOf(newProject).includes("bipbip-backoffice"),
+    textOf(newProject),
   );
 
+  const withNew = textOf(await client.callTool({ name: "list_projects", arguments: {} }));
+  check(
+    "the created project keeps the name as written",
+    withNew.includes("`bipbip-backoffice` — BipBip BackOffice"),
+    withNew,
+  );
+
+  const confusable = await client.callTool({
+    name: "publish_context",
+    arguments: cardPayload({
+      project: "bipbipbackoffice",
+      card_key: "typo-card",
+      why_not_obvious: POOLER_WHY,
+    }),
+  });
+  check(
+    "a near-miss name is refused instead of forking the board",
+    confusable.isError === true && textOf(confusable).includes("bipbip-backoffice"),
+    textOf(confusable),
+  );
+
+  const afterRefusal = textOf(await client.callTool({ name: "list_projects", arguments: {} }));
+  check(
+    "the refused name created nothing",
+    !afterRefusal.includes("`bipbipbackoffice`"),
+    afterRefusal,
+  );
+
+  const forced = await client.callTool({
+    name: "publish_context",
+    arguments: cardPayload({
+      project: "bipbipbackoffice",
+      card_key: "typo-card",
+      why_not_obvious: POOLER_WHY,
+      create_project: true,
+    }),
+  });
+  check(
+    "create_project overrides the guard when the split is deliberate",
+    textOf(forced).startsWith("Published"),
+    textOf(forced),
+  );
+
+  const acrossProjects = textOf(
+    await client.callTool({
+      name: "search_context",
+      arguments: { query: "pooler", limit: 50 },
+    }),
+  );
+  check(
+    "an unfiltered search reaches every project in the org",
+    acrossProjects.includes("pooler-limit"),
+    acrossProjects,
+  );
 
   // ---------------------------------------------------------------- isolation
 
