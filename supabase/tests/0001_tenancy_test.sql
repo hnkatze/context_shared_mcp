@@ -75,7 +75,8 @@ begin
 exception when insufficient_privilege then null;
 end $$;
 
--- Borrowing another org's project while keeping your own org_id must fail too.
+-- Borrowing the project of another org while keeping your own org_id is now
+-- refused by the composite foreign key, which no role can talk its way past.
 do $$
 begin
   insert into cards (org_id, project_id, module, card_key, summary, why_not_obvious, author)
@@ -84,8 +85,8 @@ begin
           'a string long enough to clear the quality check constraint on this column',
           'confused');
   raise exception 'card was attached to a foreign project';
-exception when raise_exception then
-  if sqlerrm like '%was attached to a foreign project%' then raise; end if;
+exception
+  when foreign_key_violation then null;
 end $$;
 
 -- The quality gate: a thin why_not_obvious is not a card.
@@ -148,6 +149,40 @@ begin
 end $$;
 
 reset role;
+-- ---------------------------------------------------------------- role safety
+
+-- Two properties this schema depends on, asserted rather than assumed.
+--
+-- FORCE keeps the owner of a table subject to its own policies. It does NOT
+-- stop a role carrying the BYPASSRLS attribute: Supabase grants exactly that to
+-- its default `postgres` role, so connecting the app with the credentials
+-- Supabase hands you leaves every policy here decorative. The application must
+-- log in as a role with neither BYPASSRLS nor ownership.
+do $$
+declare unforced text;
+begin
+  select string_agg(relname, ', ')
+    into unforced
+    from pg_class
+   where relname in ('organizations', 'projects', 'cards')
+     and relrowsecurity
+     and not relforcerowsecurity;
+
+  if unforced is not null then
+    raise exception 'these tables do not force RLS on their owner: %', unforced;
+  end if;
+
+  if exists (select 1 from pg_roles where rolname = 'mcp_app' and rolbypassrls) then
+    raise exception 'the application role carries BYPASSRLS and would see every tenant';
+  end if;
+
+  if exists (select 1 from pg_roles where rolname = 'mcp_app' and rolsuper) then
+    raise exception 'the application role is a superuser and would see every tenant';
+  end if;
+end $$;
+
+
+
 
 -- ---------------------------------------------------------------- api keys
 
