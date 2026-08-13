@@ -5,3 +5,8 @@ dist/
 *.tsbuildinfo
 .env
 .env.*
+.atl/
+.agents
+.claude
+.kiro
+skills-lock.json
