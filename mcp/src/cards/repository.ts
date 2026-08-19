@@ -1,22 +1,15 @@
 import type { PoolClient } from "pg";
-import type { PublishInput, SearchInput } from "./schema.js";
-import { isConfusable, toSlug } from "./slug.js";
 
-export type Project = {
-  readonly slug: string;
-  readonly name: string;
-  readonly cardCount: number;
-};
+import { looseQuery } from "../fts.js";
+import { resolveProject } from "../projects.js";
+import type { SourceRef } from "../refs.js";
+import type { SearchInput } from "../search.js";
+import type { PublishInput } from "./schema.js";
 
 export type Decision = {
   readonly choice: string;
   readonly rejected: string;
   readonly reason: string;
-};
-
-export type SourceRef = {
-  readonly kind: string;
-  readonly ref: string;
 };
 
 export type Card = {
@@ -40,89 +33,6 @@ export type PublishResult = {
   readonly project: string;
   readonly projectCreated: boolean;
 };
-
-export type ResolvedProject = {
-  readonly id: string;
-  readonly slug: string;
-  readonly created: boolean;
-};
-
-export class ConfusableProjectError extends Error {
-  constructor(
-    readonly slug: string,
-    readonly nearest: readonly string[],
-  ) {
-    super(
-      `Nothing published. "${slug}" does not exist yet, but this organization ` +
-        `already has ${nearest.map((s) => `"${s}"`).join(", ")}. Publish under ` +
-        `that one, or repeat the call with create_project: true if the split is deliberate.`,
-    );
-    this.name = "ConfusableProjectError";
-  }
-}
-
-export class UnusableProjectNameError extends Error {
-  constructor(readonly attempted: string) {
-    super(`"${attempted}" leaves no letters or digits to name a project with.`);
-    this.name = "UnusableProjectNameError";
-  }
-}
-
-export async function listProjects(client: PoolClient): Promise<readonly Project[]> {
-  const result = await client.query<{ slug: string; name: string; card_count: string }>(
-    `select p.slug, p.name, count(c.id)::text as card_count
-       from projects p
-       left join cards c on c.project_id = p.id
-      group by p.slug, p.name
-      order by p.slug`,
-  );
-  return result.rows.map((row) => ({
-    slug: row.slug,
-    name: row.name,
-    cardCount: Number(row.card_count),
-  }));
-}
-
-/**
- * A project is a name, not a registration: an unknown one is created on the
- * spot, unless it reads as a misspelling of a project that already exists.
- * @throws ConfusableProjectError when a near-miss is found and allowCreate is false
- */
-export async function resolveProject(
-  client: PoolClient,
-  orgId: string,
-  name: string,
-  allowCreate: boolean,
-): Promise<ResolvedProject> {
-  const slug = toSlug(name);
-  if (slug === "") throw new UnusableProjectNameError(name);
-
-  const existing = await client.query<{ id: string }>(
-    "select id from projects where slug = $1",
-    [slug],
-  );
-  const found = existing.rows[0]?.id;
-  if (found !== undefined) return { id: found, slug, created: false };
-
-  if (!allowCreate) {
-    const nearest = (await listProjects(client))
-      .map((project) => project.slug)
-      .filter((candidate) => isConfusable(slug, candidate));
-    if (nearest.length > 0) throw new ConfusableProjectError(slug, nearest);
-  }
-
-  // Two agents can publish into the same new project at once; the conflict
-  // clause makes the loser read the winner's row instead of failing.
-  const inserted = await client.query<{ id: string; created: boolean }>(
-    `insert into projects (org_id, slug, name) values ($1, $2, $3)
-       on conflict (org_id, slug) do update set name = projects.name
-     returning id, (xmax = 0) as created`,
-    [orgId, slug, name.trim()],
-  );
-  const project = inserted.rows[0];
-  if (project === undefined) throw new Error("project upsert returned no row");
-  return { id: project.id, slug, created: project.created };
-}
 
 export async function publishCard(
   client: PoolClient,
@@ -190,20 +100,6 @@ type CardRow = {
   author: string;
   updated_at: Date;
 };
-
-/**
- * A natural-language question never matches: websearch_to_tsquery ANDs every
- * term, and the simple configuration keeps stopwords as real lexemes. This
- * builds an OR of the same words so ts_rank can order them, used only as a
- * fallback so quoted phrases and exclusions still work when they find something.
- */
-function looseQuery(query: string): string | null {
-  const words = query
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}_]+/u)
-    .filter((word) => word.length > 1);
-  return words.length === 0 ? null : words.join(" | ");
-}
 
 async function runSearch(
   client: PoolClient,

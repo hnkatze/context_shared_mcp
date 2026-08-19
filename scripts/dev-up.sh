@@ -15,9 +15,15 @@ docker exec "$NAME" bash -c 'until pg_isready -q -U postgres; do sleep 0.3; done
 
 export MSYS_NO_PATHCONV=1
 docker exec "$NAME" psql -U postgres -q -c "drop database if exists ${DB};" -c "create database ${DB};"
-docker cp supabase/migrations/0001_init.sql "$NAME":/tmp/0001.sql >/dev/null
+# Applied in filename order, so a new migration needs no edit here.
+for migration in supabase/migrations/*.sql; do
+  docker cp "$migration" "$NAME":/tmp/migration.sql >/dev/null
+  docker exec "$NAME" psql -U postgres -d "$DB" -q -v ON_ERROR_STOP=1 -f /tmp/migration.sql
+done
+
+# The seed runs last on purpose: it grants the app role every table that exists
+# at that moment, which only covers the new tables once the migrations are in.
 docker cp supabase/seed/dev_seed.sql "$NAME":/tmp/seed.sql >/dev/null
-docker exec "$NAME" psql -U postgres -d "$DB" -q -v ON_ERROR_STOP=1 -f /tmp/0001.sql
 docker exec "$NAME" psql -U postgres -d "$DB" -q -v ON_ERROR_STOP=1 -f /tmp/seed.sql
 
 echo "CONTEXT_SHARED_DATABASE_URL=postgres://mcp_app:mcp@localhost:55432/${DB}"

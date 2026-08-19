@@ -70,6 +70,44 @@ function cardPayload(overrides: Record<string, unknown> = {}): Record<string, un
   };
 }
 
+const WINDOW_CHANGE =
+  "The idempotency key used to survive 24h. It now expires after 60 minutes, and a " +
+  "key reused past that point creates a second order instead of returning the first.";
+
+/**
+ * Deliberately anchored to the same endpoint the card names, and only in
+ * source_refs: neither the title nor the prose repeats the route, so a search
+ * that finds this note proves the ref reached the index rather than the title.
+ */
+function changePayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    project: "checkout",
+    module: "orders",
+    change_key: "idempotency-window-2026-08",
+    title: "The idempotency window on the order-creation endpoint dropped to 1h",
+    what_changed: WINDOW_CHANGE,
+    why: "The 24h window held merchant keys long enough to collide during batch replays",
+    impact: "Any caller that retries an order more than an hour after the first attempt",
+    do_this: ["Regenerate the idempotency key per attempt, not per session"],
+    do_not: ["Do not reuse a stale key to check whether an order already exists"],
+    test_cases: [
+      {
+        scenario: "Retry with the same key after 61 minutes",
+        expected: "A second order is created, not the original returned",
+      },
+    ],
+    source_refs: [
+      { kind: "pr", ref: "https://github.com/acme/api/pull/412" },
+      { kind: "endpoint", ref: "POST /v1/orders" },
+    ],
+    supersedes_cards: ["idempotency-scope"],
+    tags: ["orders", "idempotency"],
+    author: "gustavo",
+    occurred_at: "2026-08-14",
+    ...overrides,
+  };
+}
+
 function makeTransport(apiKey: string): StdioClientTransport {
   return new StdioClientTransport({
     command: process.execPath,
@@ -108,6 +146,7 @@ async function resetCards(): Promise<void> {
       try {
         await client.query("begin");
         await client.query("select set_config('app.current_org_id', $1, true)", [orgId]);
+        await client.query("delete from change_notes");
         await client.query("delete from cards");
         await client.query("delete from projects where slug not in ('checkout', 'billing')");
         await client.query("commit");
@@ -131,8 +170,9 @@ async function main(): Promise<void> {
   const tools = await client.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
   check(
-    "exposes the four tools",
-    names.join(",") === "list_projects,publish_context,search_context,usage_guide",
+    "exposes the six tools",
+    names.join(",") ===
+      "list_projects,publish_change,publish_context,recent_changes,search_context,usage_guide",
     `got: ${names.join(",")}`,
   );
 
@@ -208,7 +248,11 @@ async function main(): Promise<void> {
   const empty = textOf(
     await client.callTool({ name: "search_context", arguments: { query: "nonexistentterm" } }),
   );
-  check("empty search explains itself", empty.includes("No cards matched"), empty);
+  check(
+    "empty search explains itself",
+    empty.includes("Nothing on the board matched"),
+    empty,
+  );
 
   const thin = await client.callTool({
     name: "publish_context",
@@ -291,11 +335,191 @@ async function main(): Promise<void> {
     acrossProjects,
   );
 
+  // ------------------------------------------------- change notes: what someone shipped
+
+  const changePublished = await client.callTool({
+    name: "publish_change",
+    arguments: changePayload(),
+  });
+  check(
+    "publish_change creates a note and reports what it made stale",
+    textOf(changePublished).startsWith("Published change") &&
+      textOf(changePublished).includes("idempotency-scope"),
+    textOf(changePublished),
+  );
+
+  const unanchored = await client.callTool({
+    name: "publish_change",
+    arguments: changePayload({ change_key: "unanchored-note", source_refs: [] }),
+  });
+  check(
+    "a change note with no source_refs is refused",
+    unanchored.isError === true,
+    textOf(unanchored),
+  );
+
+  // The question the board exists to answer: what happened to an endpoint I
+  // consume. Neither entry names the route anywhere but in source_refs, so this
+  // fails the moment the index fix is reverted.
+  const byEndpoint = textOf(
+    await client.callTool({
+      name: "search_context",
+      arguments: { query: "POST /v1/orders", limit: 50 },
+    }),
+  );
+  check(
+    "an endpoint named only in source_refs finds the change note",
+    byEndpoint.includes("change: `idempotency-window-2026-08`"),
+    byEndpoint,
+  );
+  check(
+    "and finds the card that names the same endpoint",
+    byEndpoint.includes("key: `idempotency-scope`"),
+    byEndpoint,
+  );
+  check(
+    "changes are rendered above cards",
+    byEndpoint.indexOf("# Changes") < byEndpoint.indexOf("# Cards"),
+    byEndpoint,
+  );
+  check("the note carries what not to do", byEndpoint.includes("**Do not**"), byEndpoint);
+  check(
+    "the note carries its test cases",
+    byEndpoint.includes("Retry with the same key after 61 minutes"),
+    byEndpoint,
+  );
+  check(
+    "the note names the card it made stale",
+    byEndpoint.includes("Supersedes cards"),
+    byEndpoint,
+  );
+
+  const changesOnly = textOf(
+    await client.callTool({
+      name: "search_context",
+      arguments: { query: "idempotency", kind: "change", limit: 50 },
+    }),
+  );
+  check(
+    "kind narrows the sweep to change notes",
+    changesOnly.includes("change: `idempotency-window-2026-08`") &&
+      !changesOnly.includes("# Cards"),
+    changesOnly,
+  );
+
+  const cardsOnly = textOf(
+    await client.callTool({
+      name: "search_context",
+      arguments: { query: "idempotency", kind: "card", limit: 50 },
+    }),
+  );
+  check(
+    "kind narrows the sweep to cards",
+    cardsOnly.includes("key: `idempotency-scope`") && !cardsOnly.includes("# Changes"),
+    cardsOnly,
+  );
+
+  // ------------------------------------------------------------------------ the feed
+
+  const newer = await client.callTool({
+    name: "publish_change",
+    arguments: changePayload({
+      change_key: "order-status-enum-2026-08",
+      title: "A fifth value joined the order status enum",
+      what_changed: 'status can now be "held", between "pending" and "paid"',
+      why: "Manual review for flagged merchants needed a state of its own",
+      source_refs: [{ kind: "commit", ref: "9f2c1ab" }],
+      supersedes_cards: [],
+      occurred_at: "2026-08-17",
+    }),
+  });
+  check(
+    "a later change to the same module is a second note, not an edit",
+    textOf(newer).startsWith("Published change"),
+    textOf(newer),
+  );
+
+  const feed = textOf(
+    await client.callTool({ name: "recent_changes", arguments: { limit: 50 } }),
+  );
+  check(
+    "the feed is newest first",
+    feed.indexOf("order-status-enum-2026-08") < feed.indexOf("idempotency-window-2026-08"),
+    feed,
+  );
+
+  const sinceFilter = textOf(
+    await client.callTool({
+      name: "recent_changes",
+      arguments: { since: "2026-08-16", limit: 50 },
+    }),
+  );
+  check(
+    "since drops what happened before it",
+    sinceFilter.includes("order-status-enum-2026-08") &&
+      !sinceFilter.includes("idempotency-window-2026-08"),
+    sinceFilter,
+  );
+
+  // ------------------------------------------------------- correcting, not overwriting
+
+  const withoutDate = changePayload();
+  delete withoutDate["occurred_at"];
+  const corrected = await client.callTool({
+    name: "publish_change",
+    arguments: {
+      ...withoutDate,
+      what_changed: "Corrected: the window runs from first receipt, not from response",
+    },
+  });
+  check(
+    "republishing a change_key corrects the note",
+    textOf(corrected).startsWith("Updated change"),
+    textOf(corrected),
+  );
+
+  const afterCorrection = textOf(
+    await client.callTool({ name: "recent_changes", arguments: { limit: 50 } }),
+  );
+  check(
+    "correcting a note did not duplicate it",
+    occurrences(afterCorrection, "change: `idempotency-window-2026-08`") === 1,
+    afterCorrection,
+  );
+  check(
+    "the correction is visible",
+    afterCorrection.includes("from first receipt"),
+    afterCorrection,
+  );
+  check(
+    "correcting a note left the date the change landed alone",
+    afterCorrection.includes("happened 2026-08-14"),
+    afterCorrection,
+  );
+
+  const counted = textOf(await client.callTool({ name: "list_projects", arguments: {} }));
+  check(
+    "list_projects counts changes beside cards",
+    /`checkout` — Checkout \(\d+ cards, 2 changes\)/.test(counted),
+    counted,
+  );
+
   // ---------------------------------------------------------------- usage guide
 
   const guide = textOf(await client.callTool({ name: "usage_guide", arguments: {} }));
-  check("usage_guide states the quality gate", guide.includes("why_not_obvious"), guide);
-  check("usage_guide names the tools it documents", guide.includes("publish_context"), guide);
+  check("usage_guide states the card quality gate", guide.includes("why_not_obvious"), guide);
+  check(
+    "usage_guide states the change note gate",
+    guide.includes("source_refs") && guide.includes("rumour"),
+    guide,
+  );
+  check(
+    "usage_guide names the tools it documents",
+    guide.includes("publish_context") &&
+      guide.includes("publish_change") &&
+      guide.includes("recent_changes"),
+    guide,
+  );
 
   const skill = textOf(
     await client.callTool({ name: "usage_guide", arguments: { as_skill: true } }),
@@ -356,6 +580,27 @@ async function main(): Promise<void> {
     "a broad tag sweep stays inside the tenant",
     broadSweep.includes("idempotency-scope") && !broadSweep.includes("rival-only-fact"),
     broadSweep,
+  );
+
+  const rivalFeed = textOf(
+    await rival.callTool({ name: "recent_changes", arguments: { limit: 50 } }),
+  );
+  check(
+    "the second org's feed holds none of the first org's changes",
+    !rivalFeed.includes("idempotency-window-2026-08"),
+    rivalFeed,
+  );
+
+  const rivalSearchesChanges = textOf(
+    await rival.callTool({
+      name: "search_context",
+      arguments: { query: "POST /v1/orders", kind: "change", limit: 50 },
+    }),
+  );
+  check(
+    "change notes do not cross the tenant boundary on search either",
+    !rivalSearchesChanges.includes("idempotency-window-2026-08"),
+    rivalSearchesChanges,
   );
 
   const rivalProjects = textOf(
