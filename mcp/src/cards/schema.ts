@@ -1,14 +1,11 @@
 import * as z from "zod/v4";
 
+import { sourceRefSchema } from "../refs.js";
+
 export const decisionSchema = z.object({
   choice: z.string().min(1).describe("What was decided"),
   rejected: z.string().min(1).describe("The alternative that was turned down"),
   reason: z.string().min(1).describe("Why the alternative lost"),
-});
-
-export const sourceRefSchema = z.object({
-  kind: z.enum(["commit", "pr", "endpoint", "file"]),
-  ref: z.string().min(1).describe("Commit sha, PR url, route path, or file path"),
 });
 
 export const publishInputSchema = z.object({
@@ -50,13 +47,4 @@ export const publishInputSchema = z.object({
     ),
 });
 
-export const searchInputSchema = z.object({
-  query: z.string().min(1).optional().describe("Free text; omit to browse by filter alone"),
-  project: z.string().min(1).optional(),
-  module: z.string().min(1).optional(),
-  tags: z.array(z.string().min(1)).optional().describe("Matches a card carrying any of these"),
-  limit: z.number().int().min(1).max(50).default(10),
-});
-
 export type PublishInput = z.infer<typeof publishInputSchema>;
-export type SearchInput = z.infer<typeof searchInputSchema>;

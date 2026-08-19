@@ -52,6 +52,7 @@ async function resetCards(): Promise<void> {
       try {
         await client.query("begin");
         await client.query("select set_config('app.current_org_id', $1, true)", [orgId]);
+        await client.query("delete from change_notes");
         await client.query("delete from cards");
         await client.query("delete from projects where slug not in ('checkout', 'billing')");
         await client.query("commit");

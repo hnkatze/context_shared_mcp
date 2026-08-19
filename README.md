@@ -1,23 +1,43 @@
 # context_shared
 
-A curated context board. An agent publishes what a module's consumers cannot
-learn from the code or the OpenAPI spec, and other agents read it before asking
-a teammate. Publishing is explicit: a human decides what goes up, the agent
-writes the card.
+A curated context board for a team of agents. Publishing is explicit: a human
+decides what goes up, the agent writes it.
 
-Tenancy is `org -> project -> card`, enforced by RLS plus a trigger that holds
-even when RLS does not apply.
+The board holds two things, and the difference between them is the whole design.
+
+| | **Card** | **Change note** |
+|---|---|---|
+| Answers | "how does this module behave?" | "what did you change, and what do I do?" |
+| Shape | a durable fact, rewritten in place | a dated event, anchored to a commit |
+| Tool | `publish_context` | `publish_change` |
+| Gate | `why_not_obvious`, 40 chars | at least one `source_refs` entry |
+
+A card is the right shape for an implicit contract that outlives any one
+commit. It is the wrong shape for "Gustavo changed this endpoint yesterday":
+the upsert that keeps the board free of duplicates also erases the previous
+version, so by the time a second change lands the first one is gone. A change
+note is dated, never claims to describe the whole module, and therefore carries
+what a card must refuse — what a consumer has to do, what they must not, and
+the test cases that prove it.
+
+Tenancy is `org -> project -> {card, change note}`, enforced by RLS and, one
+layer below it, by a composite foreign key that holds even for a role RLS does
+not apply to.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `supabase/migrations/0001_init.sql` | Schema, policies, tenant trigger |
-| `supabase/tests/0001_tenancy_test.sql` | Isolation and quality-gate assertions |
+| `supabase/migrations/0001_init.sql` | Schema, policies, tenancy |
+| `supabase/migrations/0002_change_notes.sql` | Change notes, and the search index reaching `source_refs` |
+| `supabase/tests/` | Isolation, quality-gate and search assertions, one file per migration |
 | `supabase/seed/dev_seed.sql` | Two dev tenants and their API keys |
 | `mcp/` | The MCP server, in two transports: `mcp/src/stdio.ts` (local) and `mcp/src/http.ts` (hosted) |
 | `scripts/dev-up.sh` | Local Postgres on :55432, migrated and seeded |
-| `scripts/db-test.sh` | Throwaway Postgres, migration, tenancy tests |
+| `scripts/db-test.sh` | Throwaway Postgres, every migration, every SQL suite |
+
+Both scripts iterate the directories in filename order, so a new migration or a
+new SQL suite is picked up without editing them.
 
 ## Local development
 
@@ -67,12 +87,57 @@ server and any other consumer — logs in as `context_app`. `supabase/tests` ass
 role in use carries neither `BYPASSRLS` nor superuser, so a regression here
 fails the suite instead of leaking quietly.
 
-## Card shape
+One thing that grant does not do: `on all tables in schema public` is
+point-in-time. It does not reach a table created by a later migration, and the
+symptom is narrow enough to miss — the board keeps working and one new tool
+returns a permission error. `0002` therefore grants its own table to
+`context_app` and `mcp_app` when those roles exist, and every migration after it
+must do the same.
 
-`why_not_obvious` is the quality gate, and the database enforces it. If the
-publisher cannot say what the code and the spec fail to convey, there is no card
-worth writing. `card_key` is a stable slug: republishing it updates the card
-rather than adding a duplicate.
+## The two gates
+
+Each entity pays its own toll, and the database collects both.
+
+`why_not_obvious` is the card gate: 40 characters minimum stating what the code
+and the spec fail to convey. If the publisher cannot say that, there is no card
+worth writing.
+
+A change note cannot use that gate — most of what it says *is* legible in the
+diff, which was the whole reason cards refused to hold it. Its gate is
+`source_refs`, at least one entry, enforced by
+`check (jsonb_array_length(source_refs) >= 1)`. A card with nothing non-obvious
+to say is noise; a change note with nothing verifiable behind it is a rumour,
+and six weeks later a reader cannot tell one from a half-remembered Slack thread.
+
+## Keys, and what republishing means
+
+`card_key` is a stable slug for a *fact*. Republishing it updates the card
+rather than adding a duplicate — the fact moved, and the board should say so
+once.
+
+`change_key` names one *event*. Republishing it corrects that note; it does not
+restate the module. A second change gets its own key, because overwriting the
+first is exactly the history loss change notes exist to prevent.
+
+`occurred_at` is when the change landed, not when somebody got around to
+writing it down — the feed orders by it, and correcting a note never moves it.
+
+## Searching
+
+`search_context` sweeps both kinds and renders changes above cards, on the
+grounds that when the two disagree the change is the more recent account by
+construction. `kind` narrows to one. `limit` applies per kind, so asking for ten
+never returns ten changes and silently no cards.
+
+`recent_changes` is the feed: newest first, filtered by `project`, `module` and
+`since`. It exists for the state everybody is in the morning after somebody
+else's deploy — knowing something moved, but not what to search for.
+
+Migration `0002` also puts `source_refs` and `decisions` into the search index.
+Before it, the most natural question a reader has — "what do we know about
+`POST /v1/orders`" — matched nothing even when a card named exactly that route,
+and the reason an alternative lost was unsearchable the moment it was written
+down.
 
 ## Naming a project
 
@@ -91,11 +156,22 @@ the split is deliberate, `create_project: true` carries it through.
 
 ## Telling an agent how to use the board
 
-`usage_guide` returns the contract in prose: when to publish, what clears the
-quality gate, how a project gets named, and how to search before asking a
-teammate. Called with `as_skill: true` it returns the same contract as a
-`SKILL.md`, so an agent can be handed the conventions without being handed this
-README.
+`usage_guide` returns the contract in prose: when to publish a card and when a
+change note, what clears each gate, how a project gets named, and how to search
+before asking a teammate. Called with `as_skill: true` it returns the same
+contract as a `SKILL.md`, so an agent can be handed the conventions without
+being handed this README.
+
+## The tools
+
+| Tool | What it is for |
+|---|---|
+| `list_projects` | what exists, and how many cards and changes each project holds |
+| `search_context` | the board, both kinds, asked in plain prose |
+| `recent_changes` | the feed, newest first, by `project` / `module` / `since` |
+| `publish_context` | a durable fact the code and the spec do not state |
+| `publish_change` | what you shipped, and what consumers must do and must not do |
+| `usage_guide` | the contract above, optionally as a `SKILL.md` |
 
 ## A note for serverless consumers
 
