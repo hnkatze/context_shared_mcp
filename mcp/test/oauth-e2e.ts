@@ -251,6 +251,58 @@ async function main(): Promise<void> {
     check("the consent page renders", form.status === 200 && formHtml.includes("<form"), `${form.status}`);
     check("the consent page asks for the api key", formHtml.includes("api_key"), formHtml.slice(0, 200));
 
+    // 'self' resolves to nothing when the page runs with an opaque origin, and
+    // the browser then blocks the page's own submit. Absolute origins survive.
+    const csp = form.headers.get("content-security-policy") ?? "";
+    check(
+      "the CSP lets the consent form post to this server",
+      csp.includes(`form-action ${BASE}`),
+      csp,
+    );
+    check(
+      "the CSP does not rely on 'self' for form-action",
+      !csp.includes("form-action 'self'"),
+      csp,
+    );
+    check(
+      "the CSP allows the callback origin, for browsers that check the redirect",
+      csp.includes("https://claude.ai"),
+      csp,
+    );
+
+    // `;` is a legal hostname character, so a registered redirect_uri can smuggle
+    // one into the CSP header unless the derived origin is filtered.
+    const injector = await fetch(`${BASE}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: "injector",
+        redirect_uris: ["https://evil.example;style-src/cb"],
+        token_endpoint_auth_method: "none",
+      }),
+    });
+    if (injector.status === 201) {
+      const injectorId = str(await json(injector), "client_id");
+      const injected = await fetch(
+        `${BASE}/authorize?${new URLSearchParams({
+          response_type: "code",
+          client_id: injectorId,
+          redirect_uri: "https://evil.example;style-src/cb",
+          code_challenge: pkce().challenge,
+          code_challenge_method: "S256",
+          resource: RESOURCE,
+        }).toString()}`,
+      );
+      const injectedCsp = injected.headers.get("content-security-policy") ?? "";
+      check(
+        "a semicolon in a redirect_uri host cannot open a CSP directive",
+        !injectedCsp.includes("evil.example"),
+        injectedCsp,
+      );
+    } else {
+      check("a semicolon host is refused at registration", injector.status === 400, `${injector.status}`);
+    }
+
     const unknownClient = await fetch(
       `${BASE}/authorize?${new URLSearchParams({
         response_type: "code",

@@ -52,12 +52,35 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-function sendHtml(res: ServerResponse, status: number, html: string): void {
+/**
+ * `;` is a legal hostname character, so `new URL("https://x;style-src").origin`
+ * carries it straight into the header and opens a CSP directive.
+ */
+const ORIGIN_PATTERN = /^https?:\/\/[a-z0-9.-]+(:\d+)?$/i;
+
+/**
+ * Absolute origins, never 'self': in an embedded window the origin can be
+ * opaque, and there 'self' matches nothing and blocks the form's own submit.
+ * @param redirectUri - listed because some browsers apply form-action across
+ *   the redirect that follows the POST
+ */
+function formActionSources(config: OauthConfig, redirectUri: string): string {
+  const sources = [config.issuer];
+  try {
+    const origin = new URL(redirectUri).origin;
+    if (ORIGIN_PATTERN.test(origin)) sources.push(origin);
+  } catch {
+    // A redirect_uri that will not parse never reached a registered client.
+  }
+  return sources.join(" ");
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string, formAction: string): void {
   res.writeHead(status, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
-    // The consent page posts a credential and embeds no scripts of its own.
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+    // The consent page carries a credential and embeds no scripts of its own.
+    "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}`,
     "referrer-policy": "no-referrer",
   });
   res.end(html);
@@ -222,7 +245,12 @@ async function handleAuthorizeSubmit(
   if (ref === null) {
     // Re-rendering rather than redirecting keeps a failed attempt off the
     // client's callback, where a wrong key would look like a server error.
-    sendHtml(res, 200, consentPage(fieldsOf(request), "That key is not valid or has been revoked."));
+    sendHtml(
+      res,
+      200,
+      consentPage(fieldsOf(request), "That key is not valid or has been revoked."),
+      formActionSources(config, request.redirectUri),
+    );
     return;
   }
 
@@ -487,7 +515,12 @@ export async function handleOauthRoute(
         denyAuthorize(res, parsed.rejection);
         return true;
       }
-      sendHtml(res, 200, consentPage(fieldsOf(parsed.value)));
+      sendHtml(
+        res,
+        200,
+        consentPage(fieldsOf(parsed.value)),
+        formActionSources(config, parsed.value.redirectUri),
+      );
       return true;
     }
     if (method === "POST") {
