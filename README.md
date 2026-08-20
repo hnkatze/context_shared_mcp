@@ -193,7 +193,7 @@ caller is identified.
 | Transport | Who it serves | How the org is resolved |
 |---|---|---|
 | stdio (`start:stdio`) | one developer, locally | once at startup, from `CONTEXT_SHARED_API_KEY` |
-| HTTP (`start`) | the whole team, hosted | per request, from the `Authorization: Bearer` header |
+| HTTP (`start`) | the whole team, hosted | per request, from the `Authorization: Bearer` header — an API key, or an OAuth access token |
 
 That difference is not cosmetic. Over HTTP a single process serves every
 caller, so resolving the org once and reusing it would hand the first caller's
@@ -208,15 +208,22 @@ the MCP server. Railway detects it with no Root Directory setting, which its
 Railpack builder needs here: pointed at the repository root it finds no
 manifest and refuses to guess.
 
-Set one variable on the service:
+Set two variables on the service:
 
 ```
 CONTEXT_SHARED_DATABASE_URL=postgresql://context_app.<ref>:<password>@<region>.pooler.supabase.com:6543/postgres
+CONTEXT_SHARED_PUBLIC_URL=https://<service>.up.railway.app
 ```
 
 `PORT` is injected by Railway. `CONTEXT_SHARED_API_KEY` is deliberately absent:
 over HTTP the key belongs to the caller, so setting one here would pin every
 caller to a single tenant.
+
+`CONTEXT_SHARED_PUBLIC_URL` is the origin clients reach, and OAuth discovery is
+built on it. The `resource` it produces must equal the URL a user types into
+Claude character for character, so a wrong value does not degrade the connector
+— it stops it from ever finding the authorization server. Unset, the server
+says so on startup and advertises localhost.
 
 Connecting a client to the hosted server:
 
@@ -227,3 +234,57 @@ claude mcp add --transport http context-shared https://<service>.up.railway.app/
 
 `CONTEXT_SHARED_API_KEY` is deliberately not set on the server: over HTTP the
 key belongs to the caller, not to the deployment.
+
+## Adding it to Claude as a custom connector
+
+Claude Code accepts a header, so the command above hands it a key directly. The
+custom connector dialog in Claude Desktop and claude.ai does not: it offers a
+URL and, at most, OAuth client credentials. That is why this server is also an
+authorization server.
+
+Add the connector with the MCP URL and nothing else:
+
+```
+https://<service>.up.railway.app/mcp
+```
+
+Leave the OAuth fields in Advanced settings empty. Claude registers itself
+dynamically (RFC 7591), discovers the endpoints, and opens a consent page that
+asks for one thing: an API key for your organization.
+
+What the key buys is a token, not a session. The key proves who you are once and
+is never stored by Claude, never written into a config file, and never sent
+again. What Claude keeps is an access token that expires in an hour, is bound to
+this exact server as its audience, and dies the moment the key behind it is
+revoked.
+
+| Endpoint | Purpose |
+|---|---|
+| `/.well-known/oauth-protected-resource/mcp` | names the resource and points at the authorization server |
+| `/.well-known/oauth-authorization-server` | the OAuth metadata Claude reads next |
+| `/register` | dynamic client registration |
+| `/authorize` | the consent page that asks for an API key |
+| `/token` | code exchange and refresh, both with rotation |
+
+Three behaviours are deliberate and will look like bugs if you meet them
+without warning:
+
+- **A wrong PKCE verifier burns the authorization code.** A verifier that does
+  not match means whoever holds the code did not start the flow.
+- **Replaying a code revokes the tokens it already minted.** A replayed code is
+  evidence it leaked; losing a live session is the right price for that.
+- **Reusing a rotated refresh token ends the whole chain — after a 10 second
+  grace window.** Two parties holding one refresh token is the signature of a
+  stolen one, so the chain dies. Inside the window the same presentation is
+  read as one client submitting twice and is merely refused.
+
+That window is not timidity, it is the only available discriminator. A replay
+arriving milliseconds after a rotation and a client double-submitting are the
+same bytes on the same endpoint; nothing in the request distinguishes them.
+Burning unconditionally kills real sessions on a network retry, and never
+burning abandons reuse detection. Ten seconds keeps detection for every replay
+that is not simultaneous, and a replay inside the window is still caught by the
+next legitimate rotation.
+
+Revoking an API key ends every token minted from it in the same instant, with
+no sweep and no delay: resolving a token joins onto its key on every request.
