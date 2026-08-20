@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.test.json",
     "test:stdio": "npm run build && node --experimental-strip-types test/e2e.ts",
     "test:http": "npm run build && node --experimental-strip-types test/http-e2e.ts",
-    "test": "npm run test:stdio && npm run test:http",
+    "test:oauth": "npm run build && node --experimental-strip-types test/oauth-e2e.ts",
+    "test": "npm run test:stdio && npm run test:http && npm run test:oauth",
     "start": "node dist/http.js",
     "start:stdio": "node dist/stdio.js"
   },
